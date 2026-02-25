@@ -46,7 +46,20 @@ bot.onText(/\/start/, async (msg) => {
     });
   }
 
-  bot.sendMessage(chatId, "Assalomu alaykum 👋🏻\nKod yuboring 📥");
+    const text = `
+Assalomu alaykum 👋🏻
+
+<b>Games Bek botiga xush kelibsiz</b> 💪🏻  
+Sizga kerakli kodni yuboring 🤝🏻
+
+📋 Kodlar ro’yxati: 
+<a href="https://t.me/gamesbek_uz">@gamesbek_uz</a>
+`;
+
+  bot.sendMessage(chatId, text, {
+    parse_mode: "HTML",
+    disable_web_page_preview: true
+  });
 });
 
 /* ================= STATS ================= */
