@@ -2,8 +2,10 @@ import TelegramBot from "node-telegram-bot-api";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import moment from "moment-timezone";
+
 import User from "./models/User.js";
 import Media from "./models/Media.js";
+import Download from "./models/Download.js";
 
 dotenv.config();
 
@@ -42,14 +44,6 @@ bot.onText(/\/start/, async (msg) => {
       username: user.username,
       language_code: user.language_code
     });
-
-    const fullName = `${user.first_name || ""} ${user.last_name || ""}`.trim();
-    const username = user.username ? `@${user.username}` : "—";
-
-    await bot.sendMessage(adminId,
-      `🆕 <b>Yangi foydalanuvchi:</b>\n👤 <b>${fullName}</b>\n🔗 ${username}\n🆔 <code>${user.id}</code>`,
-      { parse_mode: "HTML" }
-    );
   }
 
   bot.sendMessage(chatId, "Assalomu alaykum 👋🏻\nKod yuboring 📥");
@@ -64,11 +58,17 @@ bot.onText(/\/stats/, async (msg) => {
   const mediaCount = await Media.countDocuments();
   const latestUser = await User.findOne().sort({ createdAt: -1 });
 
+  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const activeUsers = await Download.distinct("userId", {
+    createdAt: { $gte: oneDayAgo }
+  });
+
   const lastStart = latestUser ? formatDate(latestUser.createdAt) : "—";
 
   const text = `📊 <b>Statistika:</b>
 
-👥 Foydalanuvchilar: <b>${userCount}</b>
+👥 Jami foydalanuvchilar: <b>${userCount}</b>
+🟢 Aktiv (24 soat kod yuborgan): <b>${activeUsers.length}</b>
 📁 Jami fayllar: <b>${mediaCount}</b>
 🕒 Oxirgi start: <b>${lastStart}</b>`;
 
@@ -99,7 +99,7 @@ bot.on("document", async (msg) => {
   bot.sendMessage(msg.chat.id, "🔢 Kod yuboring:");
 });
 
-/* ================= DELETE FILE ================= */
+/* ================= DELETE ================= */
 
 bot.onText(/\/delete/, (msg) => {
   if (!isPrivileged(msg.from.id)) return;
@@ -122,6 +122,15 @@ bot.onText(/\/list/, async (msg) => {
   });
 
   bot.sendMessage(msg.chat.id, text, { parse_mode: "HTML" });
+});
+
+/* ================= BROADCAST ================= */
+
+bot.onText(/\/broadcast/, (msg) => {
+  if (!isPrivileged(msg.from.id)) return;
+
+  tempSteps.set(msg.from.id, { step: "awaiting_broadcast" });
+  bot.sendMessage(msg.chat.id, "📢 Xabar matnini yuboring:");
 });
 
 /* ================= CHANNEL ADD ================= */
@@ -166,20 +175,10 @@ async function isSubscribed(userId) {
 /* ================= CALLBACK ================= */
 
 bot.on("callback_query", async (q) => {
-  const id = q.from.id;
-
   if (q.data.startsWith("remove_")) {
     const ch = q.data.replace("remove_", "");
     subChannels.delete(ch);
     bot.answerCallbackQuery(q.id, { text: "O‘chirildi" });
-  }
-
-  if (q.data === "check_sub") {
-    const ok = await isSubscribed(id);
-    bot.answerCallbackQuery(q.id, {
-      text: ok ? "✅ Tasdiqlandi" : "❌ Obuna bo‘ling",
-      show_alert: true
-    });
   }
 });
 
@@ -190,6 +189,9 @@ bot.on("message", async (msg) => {
   const text = msg.text;
   const temp = tempSteps.get(userId);
 
+  if (!text || text.startsWith("/")) return;
+
+  /* CHANNEL ADD */
   if (temp?.step === "awaiting_channel") {
     if (!/^@[\w\d_]+$/.test(text))
       return bot.sendMessage(userId, "❌ Noto‘g‘ri format");
@@ -199,53 +201,74 @@ bot.on("message", async (msg) => {
     return bot.sendMessage(userId, "✅ Kanal qo‘shildi");
   }
 
-  if (!text || text.startsWith("/")) return;
+  /* BROADCAST */
+  if (temp?.step === "awaiting_broadcast") {
+    const users = await User.find();
+    let success = 0;
+    let failed = 0;
 
-  if (!isPrivileged(userId)) {
-    if (!(await isSubscribed(userId))) {
-      return bot.sendMessage(userId, "📢 Obuna bo‘ling", {
-        reply_markup: {
-          inline_keyboard: [
-            ...[...subChannels].map(ch => [{
-              text: ch,
-              url: `https://t.me/${ch.replace("@", "")}`
-            }]),
-            [{ text: "✅ Tekshirish", callback_data: "check_sub" }]
-          ]
+    for (const user of users) {
+      try {
+        await bot.sendMessage(user.userId, text);
+        success++;
+        await new Promise(r => setTimeout(r, 35));
+      } catch (err) {
+        failed++;
+        if (err.response?.statusCode === 403) {
+          await User.deleteOne({ userId: user.userId });
         }
-      });
+      }
     }
 
-    const file = await Media.findOne({ code: Number(text) });
-    if (!file) return bot.sendMessage(userId, "❌ Kod topilmadi");
-
-    return bot.sendDocument(userId, file.file_id, {
-      caption: file.caption || `Kod: ${file.code}`
-    });
-  }
-
-  if (temp?.step === "awaiting_code") {
-    tempSteps.set(userId, { ...temp, code: Number(text), step: "awaiting_caption" });
-    return bot.sendMessage(userId, "📝 Izoh yuboring:");
-  }
-
-  if (temp?.step === "awaiting_caption") {
-    await Media.create({
-      code: temp.code,
-      file_id: temp.file_id,
-      file_name: temp.file_name,
-      caption: text
-    });
-
     tempSteps.delete(userId);
-    return bot.sendMessage(userId, "✅ Saqlandi");
+    return bot.sendMessage(userId,
+      `✅ Yuborildi: ${success}\n❌ Yuborilmadi: ${failed}`
+    );
   }
 
-  if (tempDelete.get(userId)) {
-    const file = await Media.findOneAndDelete({ code: Number(text) });
-    tempDelete.delete(userId);
-    return bot.sendMessage(userId, file ? "🔴 O‘chirildi" : "❌ Topilmadi");
+  /* ADMIN FILE FLOW */
+  if (isPrivileged(userId)) {
+
+    if (temp?.step === "awaiting_code") {
+      tempSteps.set(userId, { ...temp, code: Number(text), step: "awaiting_caption" });
+      return bot.sendMessage(userId, "📝 Izoh yuboring:");
+    }
+
+    if (temp?.step === "awaiting_caption") {
+      await Media.create({
+        code: temp.code,
+        file_id: temp.file_id,
+        file_name: temp.file_name,
+        caption: text
+      });
+
+      tempSteps.delete(userId);
+      return bot.sendMessage(userId, "✅ Saqlandi");
+    }
+
+    if (tempDelete.get(userId)) {
+      const file = await Media.findOneAndDelete({ code: Number(text) });
+      tempDelete.delete(userId);
+      return bot.sendMessage(userId, file ? "🔴 O‘chirildi" : "❌ Topilmadi");
+    }
+
+    return;
   }
+
+  /* USER FILE REQUEST */
+
+  if (!(await isSubscribed(userId))) {
+    return bot.sendMessage(userId, "📢 Obuna bo‘ling");
+  }
+
+  const file = await Media.findOne({ code: Number(text) });
+  if (!file) return bot.sendMessage(userId, "❌ Kod topilmadi");
+
+  await Download.create({ userId, code: file.code });
+
+  return bot.sendDocument(userId, file.file_id, {
+    caption: file.caption || `Kod: ${file.code}`
+  });
 });
 
 console.log("🚀 Bot ishlayapti");
